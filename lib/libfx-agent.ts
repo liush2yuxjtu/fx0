@@ -15,6 +15,7 @@ import { turnBudget } from './turn-budget'
 import {
   DEFAULT_MODEL,
   MAX_TURN_MODEL_STEPS,
+  USE_DEEPSEEK,
   effectiveEffort,
   effectiveFast,
   effectiveModel,
@@ -91,6 +92,26 @@ interface ChatGateway {
   lastGatewayError: GatewayError | null
 }
 const chatGateways = new Map<string, ChatGateway>()
+const DEEPSEEK_BASE_URL = process.env.DEEPSEEK_BASE_URL ?? 'https://api.deepseek.com/v1'
+const DEEPSEEK_CHAT_URL = DEEPSEEK_BASE_URL.replace(/\/$/, '') + '/chat/completions'
+const DEEPSEEK_PROVIDER = {
+  name: 'deepseek',
+  baseUrl: DEEPSEEK_BASE_URL,
+  models: {
+    'deepseek-flash': {
+      contextWindow: 1_000_000,
+      maxOutputTokens: 384_000,
+      supportsToolUse: true,
+      supportsVision: true,
+    },
+  },
+}
+
+function deepseekCredentials(): { apiKey: string } {
+  const apiKey = process.env.DEEPSEEK_API_KEY
+  if (!apiKey) throw new AuthError(503, 'DeepSeek provider is not configured')
+  return { apiKey }
+}
 
 // Every model request uses the executing turn's recorded funding. With no usable
 // credential the request fails: fx0 never falls back to the deployment's key.
@@ -121,22 +142,25 @@ function chatFetch(
     let observer: DesignDraftObserver | undefined
     if (id) {
       chatGateways.set(id, gateway)
-      // All three use the same executing turn; reserving its preview and its step adds
-      // no serial round trip to the funding lookup before the model request starts.
       const [funding, draft, steps] = await Promise.all([
-        readExecutionFunding(id, turn),
+        USE_DEEPSEEK ? Promise.resolve({ ok: false as const, refused: 'deepseek-provider' }) : readExecutionFunding(id, turn),
         turn && modelRequest ? storedDraftObserver(id, turn).catch(() => undefined) : undefined,
         turn && modelRequest ? turnBudget().reserve(id, turn, modelStepName(sender, body)) : 0,
       ])
       if (steps > MAX_TURN_MODEL_STEPS) return limited()
-      // The request fails below with "sign in again"; the log says why, with
-      // the turn and reason only, never a credential.
-      if (!funding.ok && modelRequest) log(id, 'funding:refused', { turn: turn ?? null, reason: funding.refused })
-      const credential = funding.ok ? funding.credential : null
-      gateway.gatewaySession = !credential ? null : 'kind' in credential ? credential : { ...credential, email: '', loginAt: 0, isLoggedIn: true }
+      if (!USE_DEEPSEEK) {
+        if (!funding.ok && modelRequest) log(id, 'funding:refused', { turn: turn ?? null, reason: funding.refused })
+        const credential = funding.ok ? funding.credential : null
+        gateway.gatewaySession = !credential ? null : 'kind' in credential ? credential : { ...credential, email: '', loginAt: 0, isLoggedIn: true }
+      }
       observer = modelRequest && watchDraft ? watchDraft(draft) : draft
     }
     try {
+      if (USE_DEEPSEEK) {
+        const endpoint = url.origin + url.pathname
+        if (endpoint !== DEEPSEEK_CHAT_URL || method !== 'POST') return jsonError(403, 'DeepSeek provider endpoint is restricted')
+        return await fetch(input, { ...init, cache: 'no-store', redirect: 'error' })
+      }
       return await gatewayFetch(gateway, fetch, observer)(input, init)
     } catch (error) {
       // No stored credential, or one too close to expiry to start a request.
@@ -210,9 +234,11 @@ export function durableAgent(runtime: ChatRuntime, instructions: string): FxAgen
     // the request that sent it, with no queue hop, and Vercel Queues keeps the
     // prompt as a backstop until after that request's time limit.
 
-    // Placeholder: chatFetch sets each request's credential, and fx0 never uses
-    // libfx's environment or OIDC fallback.
-    apiKey: 'session-authenticated',
+    // Gateway mode uses per-turn OAuth. DeepSeek mode uses libfx's custom
+    // provider authorizer and adds the key only to DeepSeek's chat endpoint.
+    ...(USE_DEEPSEEK
+      ? { provider: DEEPSEEK_PROVIDER, credentials: deepseekCredentials }
+      : { apiKey: 'session-authenticated' }),
     fetch: (input, init) => {
       const id = requestHeader(input, init, 'x-session-id')
       return chatFetch(() => chatOfRequest(id), () => drafts.turn(id), 'parent', runtime.watchDraft)(input, init)
@@ -272,7 +298,9 @@ export async function runSubagent(
   // The parent turn's settings, even if the chat's were changed since it started.
   const pinned = active?.id === turnId ? active.settings : undefined
   const engine = await createFxEngine({
-    apiKey: 'session-authenticated',
+    ...(USE_DEEPSEEK
+      ? { provider: DEEPSEEK_PROVIDER, credentials: deepseekCredentials }
+      : { apiKey: 'session-authenticated' }),
     fetch: chatFetch(async () => chatId, () => turnId, `subagent:${crypto.randomUUID()}`, runtime.watchDraft),
     model: pinned
       ? { id: pinned.model, effort: pinned.effort as FxEffort, fast: pinned.fast }
