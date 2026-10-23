@@ -129,7 +129,9 @@ function chatFetch(
     const id = await chatId()
     const url = new URL(input instanceof Request ? input.url : String(input))
     const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase()
-    const modelRequest = method === 'POST' && url.pathname.endsWith('/language-model')
+    const modelRequest = method === 'POST' && (USE_DEEPSEEK
+      ? url.origin + url.pathname === DEEPSEEK_CHAT_URL
+      : url.pathname.endsWith('/language-model'))
     const body = modelRequest ? requestJson(init?.body) : null
     const limited = () => {
       log(id ?? 'unknown', 'turn:step-limit', { steps: MAX_TURN_MODEL_STEPS, sender: sender === 'parent' ? 'parent' : 'subagent' })
