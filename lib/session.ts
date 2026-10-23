@@ -4,7 +4,8 @@ import { sanitizeSessionId } from './session-id'
 import type { StreamItem } from './events'
 
 const KEY = '__fx0Sessions'
-export const DEFAULT_MODEL = 'anthropic/claude-opus-5.5-fast'
+export const USE_DEEPSEEK = process.env.FX0_PROVIDER === 'deepseek'
+export const DEFAULT_MODEL = USE_DEEPSEEK ? 'deepseek-flash' : 'anthropic/claude-opus-5.5-fast'
 
 // libfx leaves step budgets to the host. Without this cap, a turn or subagent that
 // keeps calling tools would run, and bill, until the function times out. The
@@ -86,11 +87,12 @@ export function errorText(error: unknown): string {
 
 
 export function effectiveModel(host: SessionState): string {
-  return host.preferredModel ?? process.env.FX0_MODEL ?? DEFAULT_MODEL
+  const selected = host.preferredModel ?? process.env.FX0_MODEL ?? DEFAULT_MODEL
+  return USE_DEEPSEEK && !selected.startsWith('deepseek-') ? DEFAULT_MODEL : selected
 }
 
 export function effectiveFast(host: SessionState): boolean {
-  return host.preferredFast ?? false
+  return USE_DEEPSEEK ? false : host.preferredFast ?? false
 }
 
 export function effectiveEffort(host: SessionState): string {
